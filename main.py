@@ -34,18 +34,29 @@ async def analyze_archive(
         file_tree = []
         extracted_blocks = []
         total_chars = 0
-        MAX_CHARS = 95000  # Limite seguro de contexto para os modelos da Groq
+        # 22.000 caracteres (~5.500 tokens) cabe com folga no limite gratuito de 8.000 TPM da Groq
+        MAX_CHARS = 22000
 
         valid_extensions = (
             '.java', '.kt', '.js', '.jsx', '.ts', '.tsx', '.py',
-            '.json', '.xml', '.gradle', '.txt', '.md', '.properties', '.smali'
+            '.json', '.xml', '.gradle', '.properties'
         )
 
         with zipfile.ZipFile(zip_buffer, 'r') as zip_ref:
             all_names = zip_ref.namelist()
             file_tree = [f for f in all_names if not f.endswith('/')]
 
-            for fname in file_tree:
+            # Ordena para ler primeiro AndroidManifest, build.gradle e códigos-fonte principais
+            prioritized_files = sorted(
+                file_tree,
+                key=lambda x: (
+                    0 if 'AndroidManifest' in x else
+                    1 if 'build.gradle' in x else
+                    2 if x.endswith(('.java', '.kt', '.js', '.ts')) else 3
+                )
+            )
+
+            for fname in prioritized_files:
                 if total_chars >= MAX_CHARS:
                     break
                 if fname.lower().endswith(valid_extensions) or 'AndroidManifest' in fname:
@@ -55,27 +66,25 @@ async def analyze_archive(
                             text_content = raw_bytes.decode('utf-8', errors='ignore').strip()
                             if text_content:
                                 available = MAX_CHARS - total_chars
-                                snippet = text_content[:available]
-                                block = f"\n=========================================\n📄 ARQUIVO: {fname}\n=========================================\n{snippet}\n"
+                                snippet = text_content[:min(available, 4500)]
+                                block = f"\n--- 📄 {fname} ---\n{snippet}\n"
                                 extracted_blocks.append(block)
                                 total_chars += len(block)
                     except Exception:
                         continue
 
-        tree_summary = "\n".join([f"  - {f}" for f in file_tree[:60]])
-        if len(file_tree) > 60:
-            tree_summary += f"\n  ... (+{len(file_tree) - 60} arquivos ocultos na listagem)"
+        tree_summary = "\n".join([f"  - {f}" for f in file_tree[:40]])
+        if len(file_tree) > 40:
+            tree_summary += f"\n  ... (+{len(file_tree) - 40} arquivos)"
 
         final_context = (
-            f"📦 PACOTE PROCESSADO NA NUVEM: {file.filename}\n"
-            f"📁 Total de arquivos internos: {len(file_tree)}\n"
-            f"📄 Arquivos de código lidos: {len(extracted_blocks)} ({round(total_chars/1024, 1)} KB)\n\n"
-            f"--- ÁRVORE DE DIRETÓRIOS ---\n{tree_summary}\n\n"
-            f"--- CONTEÚDO DOS ARQUIVOS EXTRAÍDOS ---\n"
+            f"📦 PACOTE: {file.filename} ({len(file_tree)} arquivos internos)\n"
+            f"📄 Lidos: {len(extracted_blocks)} arquivos ({round(total_chars/1024, 1)} KB)\n\n"
+            f"--- ESTRUTURA ---\n{tree_summary}\n\n"
+            f"--- CÓDIGOS PRINCIPAIS ---\n"
             + "".join(extracted_blocks)
         )
 
-        # Enviar para a API da Groq usando a sua chave
         groq_res = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={
